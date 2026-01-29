@@ -1,6 +1,6 @@
 use anyhow::{bail, Context, Result};
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -37,18 +37,23 @@ pub struct HookFollower {
 }
 
 impl HookFollower {
-    pub fn open(path: &Path) -> Result<Self> {
+    pub fn open(path: &Path, follow_from_end: bool) -> Result<Self> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)
                 .with_context(|| format!("failed to create hook output dir: {}", parent.display()))?;
         }
 
-        let file = OpenOptions::new()
+        let mut file = OpenOptions::new()
             .create(true)
             .read(true)
             .write(true)
             .open(path)
             .with_context(|| format!("failed to open hook output: {}", path.display()))?;
+
+        if follow_from_end {
+            file.seek(SeekFrom::End(0))
+                .context("failed to seek hook output")?;
+        }
 
         Ok(Self {
             reader: BufReader::new(file),

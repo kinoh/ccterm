@@ -1,8 +1,12 @@
+mod cli_adapter;
+mod context;
 mod hooks;
 mod sessions;
+mod types;
 
 use anyhow::{Context, Result};
 use std::env;
+use std::io::BufRead;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -22,6 +26,7 @@ fn main() -> Result<()> {
     match args[0].as_str() {
         "hook" => run_hook(&args[1..]),
         "run" => run_session(&args[1..]),
+        "cli" => run_cli(&args[1..]),
         "help" | "-h" | "--help" => {
             print_usage();
             Ok(())
@@ -155,7 +160,7 @@ fn run_session(args: &[String]) -> Result<()> {
         .send(&session_name, &message)
         .with_context(|| format!("failed to send message to {session_name}"))?;
 
-    let mut follower = hooks::HookFollower::open(&hook_path)?;
+    let mut follower = hooks::HookFollower::open(&hook_path, true)?;
     let line = follower.wait_for_line(Duration::from_secs(timeout_secs))?;
     println!("hook: {line}");
 
@@ -168,13 +173,181 @@ fn run_session(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+fn run_cli(args: &[String]) -> Result<()> {
+    let mut timeout_secs = DEFAULT_TIMEOUT_SECS;
+    let mut prefix = DEFAULT_PREFIX.to_string();
+    let mut claude_cmd = DEFAULT_CLAUDE_CMD.to_string();
+    let mut hook_path = sessions::default_hook_path()?;
+    let mut cwd = sessions::default_cwd()?;
+    let mut keep_session = false;
+    let mut accept_trust = false;
+    let mut startup_wait_ms: u64 = 1500;
+    let mut post_trust_wait_ms: u64 = 1500;
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--timeout" => {
+                let value = args.get(i + 1).context("--timeout requires a value")?;
+                timeout_secs = value.parse().context("invalid --timeout")?;
+                i += 2;
+            }
+            "--prefix" => {
+                let value = args.get(i + 1).context("--prefix requires a value")?;
+                prefix = value.to_string();
+                i += 2;
+            }
+            "--claude-cmd" => {
+                let value = args.get(i + 1).context("--claude-cmd requires a value")?;
+                claude_cmd = value.to_string();
+                i += 2;
+            }
+            "--hook-path" => {
+                let value = args.get(i + 1).context("--hook-path requires a value")?;
+                hook_path = PathBuf::from(value);
+                i += 2;
+            }
+            "--cwd" => {
+                let value = args.get(i + 1).context("--cwd requires a value")?;
+                cwd = PathBuf::from(value);
+                i += 2;
+            }
+            "--keep-session" => {
+                keep_session = true;
+                i += 1;
+            }
+            "--accept-trust" => {
+                accept_trust = true;
+                i += 1;
+            }
+            "--startup-wait-ms" => {
+                let value = args
+                    .get(i + 1)
+                    .context("--startup-wait-ms requires a value")?;
+                startup_wait_ms = value.parse().context("invalid --startup-wait-ms")?;
+                i += 2;
+            }
+            "--post-trust-wait-ms" => {
+                let value = args
+                    .get(i + 1)
+                    .context("--post-trust-wait-ms requires a value")?;
+                post_trust_wait_ms = value.parse().context("invalid --post-trust-wait-ms")?;
+                i += 2;
+            }
+            "--help" | "-h" => {
+                print_cli_usage();
+                return Ok(());
+            }
+            other => {
+                return Err(anyhow::anyhow!("unknown cli argument: {other}"));
+            }
+        }
+    }
+
+    sessions::ensure_tmux_available()?;
+    sessions::ensure_claude_available(&claude_cmd)?;
+    sessions::ensure_dir(&hook_path)?;
+
+    let session_name = sessions::timestamp_session_name(&prefix)?;
+    let manager = sessions::TmuxSessionManager::new(&claude_cmd, &cwd);
+    manager
+        .spawn(&session_name)
+        .with_context(|| format!("failed to spawn tmux session {session_name}"))?;
+
+    std::thread::sleep(Duration::from_millis(startup_wait_ms));
+    if accept_trust {
+        manager.send_enter(&session_name)?;
+        std::thread::sleep(Duration::from_millis(post_trust_wait_ms));
+    }
+
+    let stdin = std::io::stdin();
+    let mut lines = stdin.lock().lines();
+    let mut follower = hooks::HookFollower::open(&hook_path, true)?;
+
+    while let Some(line) = lines.next() {
+        let line = line.context("failed to read stdin")?;
+        let input = match cli_adapter::parse_input(&line) {
+            Ok(value) => value,
+            Err(err) => {
+                eprintln!("invalid input: {err}");
+                continue;
+            }
+        };
+
+        manager
+            .send(&session_name, &input.text)
+            .with_context(|| format!("failed to send message to {session_name}"))?;
+
+        let hook_line = match follower.wait_for_line(Duration::from_secs(timeout_secs)) {
+            Ok(value) => value,
+            Err(err) => {
+                eprintln!("hook timeout: {err}");
+                continue;
+            }
+        };
+
+        let transcript_path = match extract_transcript_path(&hook_line) {
+            Ok(path) => path,
+            Err(err) => {
+                eprintln!("failed to parse hook event: {err}");
+                continue;
+            }
+        };
+
+        let assistant_text = match context::latest_assistant_text(&transcript_path) {
+            Ok(Some(text)) => text,
+            Ok(None) => {
+                eprintln!("no assistant text found");
+                continue;
+            }
+            Err(err) => {
+                eprintln!("failed to read transcript: {err}");
+                continue;
+            }
+        };
+
+        let outgoing = types::OutgoingMessage {
+            text: assistant_text,
+            conversation_id: input.conversation_id,
+            thread_id: input.thread_id,
+        };
+        let pretty = cli_adapter::pretty_outgoing(&outgoing)?;
+        println!("{pretty}");
+    }
+
+    if !keep_session {
+        manager
+            .stop(&session_name)
+            .with_context(|| format!("failed to stop session {session_name}"))?;
+    }
+
+    Ok(())
+}
+
+fn extract_transcript_path(hook_line: &str) -> Result<PathBuf> {
+    let value: serde_json::Value =
+        serde_json::from_str(hook_line).context("hook event is not valid JSON")?;
+    let path = value
+        .get("transcript_path")
+        .or_else(|| value.get("agent_transcript_path"))
+        .and_then(|v| v.as_str())
+        .context("hook event missing transcript_path")?;
+    Ok(PathBuf::from(path))
+}
+
 fn print_usage() {
-    eprintln!("ccterm usage:\n  ccterm run [options]\n  ccterm hook --out <path>");
+    eprintln!("ccterm usage:\n  ccterm run [options]\n  ccterm cli [options]\n  ccterm hook --out <path>");
 }
 
 fn print_run_usage() {
     eprintln!(
         "ccterm run options:\n  --message <text>\n  --timeout <secs>\n  --prefix <session-prefix>\n  --claude-cmd <command>\n  --hook-path <path>\n  --cwd <path>\n  --keep-session\n  --accept-trust\n  --startup-wait-ms <ms>\n  --post-trust-wait-ms <ms>"
+    );
+}
+
+fn print_cli_usage() {
+    eprintln!(
+        "ccterm cli options:\n  --timeout <secs>\n  --prefix <session-prefix>\n  --claude-cmd <command>\n  --hook-path <path>\n  --cwd <path>\n  --keep-session\n  --accept-trust\n  --startup-wait-ms <ms>\n  --post-trust-wait-ms <ms>\n\ninput format:\n  thread:<id> <text>\n  <text>"
     );
 }
 
