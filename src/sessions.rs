@@ -1,7 +1,7 @@
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub struct TmuxSessionManager {
     claude_cmd: String,
@@ -79,6 +79,20 @@ impl TmuxSessionManager {
         }
         Ok(())
     }
+
+    pub fn capture_pane(&self, session_name: &str, lines: usize) -> Result<String> {
+        let line_arg = format!("-{}", lines);
+        let output = Command::new("tmux")
+            .args(["capture-pane", "-t", session_name, "-p", "-S", &line_arg])
+            .output()
+            .context("failed to capture tmux pane")?;
+
+        if !output.status.success() {
+            bail!("tmux capture-pane failed with status: {}", output.status);
+        }
+
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    }
 }
 
 pub fn timestamp_session_name(prefix: &str) -> Result<String> {
@@ -125,4 +139,50 @@ pub fn ensure_dir(path: &Path) -> Result<()> {
             .with_context(|| format!("failed to create dir: {}", parent.display()))?;
     }
     Ok(())
+}
+
+pub fn wait_for_prompt(
+    manager: &TmuxSessionManager,
+    session_name: &str,
+    timeout: Duration,
+    poll: Duration,
+) -> Result<()> {
+    let start = std::time::Instant::now();
+    loop {
+        let pane = manager.capture_pane(session_name, 200)?;
+        if prompt_ready(&pane) {
+            return Ok(());
+        }
+        if start.elapsed() > timeout {
+            bail!("timed out waiting for input prompt");
+        }
+        std::thread::sleep(poll);
+    }
+}
+
+fn prompt_ready(pane: &str) -> bool {
+    let lines: Vec<String> = pane
+        .lines()
+        .map(|line| line.replace('\u{00A0}', " "))
+        .collect();
+    let tail = lines.iter().rev().take(12);
+
+    if tail.clone().any(|line| line.contains("esc to interrupt")) {
+        return false;
+    }
+
+    for line in tail {
+        let trimmed = line.trim_start();
+        if let Some(rest) = trimmed.strip_prefix('❯') {
+            if rest.trim().is_empty() {
+                return true;
+            }
+        }
+        if let Some(rest) = trimmed.strip_prefix('>') {
+            if rest.trim().is_empty() {
+                return true;
+            }
+        }
+    }
+    false
 }

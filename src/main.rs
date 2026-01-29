@@ -73,6 +73,8 @@ fn run_session(args: &[String]) -> Result<()> {
     let mut accept_trust = false;
     let mut startup_wait_ms: u64 = 1500;
     let mut post_trust_wait_ms: u64 = 1500;
+    let mut wait_prompt = true;
+    let mut prompt_timeout_ms: u64 = 15000;
 
     let mut i = 0;
     while i < args.len() {
@@ -129,6 +131,21 @@ fn run_session(args: &[String]) -> Result<()> {
                 post_trust_wait_ms = value.parse().context("invalid --post-trust-wait-ms")?;
                 i += 2;
             }
+            "--wait-prompt" => {
+                wait_prompt = true;
+                i += 1;
+            }
+            "--no-wait-prompt" => {
+                wait_prompt = false;
+                i += 1;
+            }
+            "--prompt-timeout-ms" => {
+                let value = args
+                    .get(i + 1)
+                    .context("--prompt-timeout-ms requires a value")?;
+                prompt_timeout_ms = value.parse().context("invalid --prompt-timeout-ms")?;
+                i += 2;
+            }
             "--help" | "-h" => {
                 print_run_usage();
                 return Ok(());
@@ -154,6 +171,15 @@ fn run_session(args: &[String]) -> Result<()> {
     if accept_trust {
         manager.send_enter(&session_name)?;
         std::thread::sleep(Duration::from_millis(post_trust_wait_ms));
+    }
+
+    if wait_prompt {
+        sessions::wait_for_prompt(
+            &manager,
+            &session_name,
+            Duration::from_millis(prompt_timeout_ms),
+            Duration::from_millis(200),
+        )?;
     }
 
     manager
@@ -183,6 +209,8 @@ fn run_cli(args: &[String]) -> Result<()> {
     let mut accept_trust = false;
     let mut startup_wait_ms: u64 = 1500;
     let mut post_trust_wait_ms: u64 = 1500;
+    let mut wait_prompt = true;
+    let mut prompt_timeout_ms: u64 = 15000;
 
     let mut i = 0;
     while i < args.len() {
@@ -234,6 +262,21 @@ fn run_cli(args: &[String]) -> Result<()> {
                 post_trust_wait_ms = value.parse().context("invalid --post-trust-wait-ms")?;
                 i += 2;
             }
+            "--wait-prompt" => {
+                wait_prompt = true;
+                i += 1;
+            }
+            "--no-wait-prompt" => {
+                wait_prompt = false;
+                i += 1;
+            }
+            "--prompt-timeout-ms" => {
+                let value = args
+                    .get(i + 1)
+                    .context("--prompt-timeout-ms requires a value")?;
+                prompt_timeout_ms = value.parse().context("invalid --prompt-timeout-ms")?;
+                i += 2;
+            }
             "--help" | "-h" => {
                 print_cli_usage();
                 return Ok(());
@@ -273,6 +316,18 @@ fn run_cli(args: &[String]) -> Result<()> {
                 continue;
             }
         };
+
+        if wait_prompt {
+            if let Err(err) = sessions::wait_for_prompt(
+                &manager,
+                &session_name,
+                Duration::from_millis(prompt_timeout_ms),
+                Duration::from_millis(200),
+            ) {
+                eprintln!("prompt not ready: {err}");
+                continue;
+            }
+        }
 
         manager
             .send(&session_name, &input.text)
@@ -341,13 +396,13 @@ fn print_usage() {
 
 fn print_run_usage() {
     eprintln!(
-        "ccterm run options:\n  --message <text>\n  --timeout <secs>\n  --prefix <session-prefix>\n  --claude-cmd <command>\n  --hook-path <path>\n  --cwd <path>\n  --keep-session\n  --accept-trust\n  --startup-wait-ms <ms>\n  --post-trust-wait-ms <ms>"
+        "ccterm run options:\n  --message <text>\n  --timeout <secs>\n  --prefix <session-prefix>\n  --claude-cmd <command>\n  --hook-path <path>\n  --cwd <path>\n  --keep-session\n  --accept-trust\n  --startup-wait-ms <ms>\n  --post-trust-wait-ms <ms>\n  --wait-prompt | --no-wait-prompt\n  --prompt-timeout-ms <ms>"
     );
 }
 
 fn print_cli_usage() {
     eprintln!(
-        "ccterm cli options:\n  --timeout <secs>\n  --prefix <session-prefix>\n  --claude-cmd <command>\n  --hook-path <path>\n  --cwd <path>\n  --keep-session\n  --accept-trust\n  --startup-wait-ms <ms>\n  --post-trust-wait-ms <ms>\n\ninput format:\n  thread:<id> <text>\n  <text>"
+        "ccterm cli options:\n  --timeout <secs>\n  --prefix <session-prefix>\n  --claude-cmd <command>\n  --hook-path <path>\n  --cwd <path>\n  --keep-session\n  --accept-trust\n  --startup-wait-ms <ms>\n  --post-trust-wait-ms <ms>\n  --wait-prompt | --no-wait-prompt\n  --prompt-timeout-ms <ms>\n\ninput format:\n  thread:<id> <text>\n  <text>"
     );
 }
 
