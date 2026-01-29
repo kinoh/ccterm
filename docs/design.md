@@ -11,13 +11,13 @@
   - Replies within a thread reuse the thread session (users can join mid-thread)
 - Users: no per-user isolation; identify users only by message metadata
 - Chat interface: adapter-based integration (Slack only for now)
-- Input: Slack RTM mentions to the bot
+- Input: Slack Socket Mode (Events API app_mention)
 - Output: post when Stop/SubagentStop/Notification hooks fire
 - Process management: start/stop Claude Code and monitor health
 - Transcript handling: read/tail/parse JSONL at `transcript_path`
 - tmux/Claude Code command: fixed; working directory is fixed
 - Error handling: coordinator forwards errors to conversation message sending (best effort)
-- Configuration: TOML (no required keys for minimal setup)
+- Configuration: TOML (Slack bot token and app token are required)
 - Deployment: standalone binary (direct execution)
 
 ## Domain Model
