@@ -38,14 +38,13 @@ impl TmuxSessionManager {
         Ok(())
     }
 
-    pub fn send_text(&self, session_name: &str, text: &str) -> Result<()> {
+    pub fn send(&self, session_name: &str, text: &str) -> Result<()> {
         let status = Command::new("tmux")
             .args([
                 "send-keys",
                 "-t",
                 session_name,
                 text,
-                "C-m",
             ])
             .status()
             .context("failed to send keys to tmux")?;
@@ -53,10 +52,12 @@ impl TmuxSessionManager {
         if !status.success() {
             bail!("tmux send-keys failed with status: {status}");
         }
+        std::thread::sleep(Duration::from_millis(5));
+        self.send_enter(session_name)?;
         Ok(())
     }
 
-    pub fn send_enter(&self, session_name: &str) -> Result<()> {
+    fn send_enter(&self, session_name: &str) -> Result<()> {
         let status = Command::new("tmux")
             .args(["send-keys", "-t", session_name, "C-m"])
             .status()

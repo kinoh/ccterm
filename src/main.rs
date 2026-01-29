@@ -169,7 +169,9 @@ fn run_session(args: &[String]) -> Result<()> {
 
     std::thread::sleep(Duration::from_millis(startup_wait_ms));
     if accept_trust {
-        manager.send_enter(&session_name)?;
+        manager
+            .send(&session_name, "1")
+            .with_context(|| format!("failed to accept trust for {session_name}"))?;
         std::thread::sleep(Duration::from_millis(post_trust_wait_ms));
     }
 
@@ -183,12 +185,8 @@ fn run_session(args: &[String]) -> Result<()> {
     }
 
     manager
-        .send_text(&session_name, &message)
+        .send(&session_name, &message)
         .with_context(|| format!("failed to send message to {session_name}"))?;
-    std::thread::sleep(Duration::from_millis(5));
-    manager
-        .send_enter(&session_name)
-        .with_context(|| format!("failed to send enter to {session_name}"))?;
 
     let mut follower = hooks::HookFollower::open(&hook_path, true)?;
     let line = follower.wait_for_line(Duration::from_secs(timeout_secs))?;
@@ -303,7 +301,9 @@ fn run_cli(args: &[String]) -> Result<()> {
 
     std::thread::sleep(Duration::from_millis(startup_wait_ms));
     if accept_trust {
-        manager.send_enter(&session_name)?;
+        manager
+            .send(&session_name, "1")
+            .with_context(|| format!("failed to accept trust for {session_name}"))?;
         std::thread::sleep(Duration::from_millis(post_trust_wait_ms));
     }
 
@@ -334,12 +334,8 @@ fn run_cli(args: &[String]) -> Result<()> {
         }
 
         manager
-            .send_text(&session_name, &input.text)
+            .send(&session_name, &input.text)
             .with_context(|| format!("failed to send message to {session_name}"))?;
-        std::thread::sleep(Duration::from_millis(5));
-        manager
-            .send_enter(&session_name)
-            .with_context(|| format!("failed to send enter to {session_name}"))?;
 
         let hook_line = match follower.wait_for_line(Duration::from_secs(timeout_secs)) {
             Ok(value) => value,
