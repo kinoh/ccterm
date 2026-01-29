@@ -1,0 +1,34 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/target/debug/ccterm hook --out $CLAUDE_PROJECT_DIR/.claude/hooks/events.jsonl"
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/target/debug/ccterm hook --out $CLAUDE_PROJECT_DIR/.claude/hooks/events.jsonl"
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/target/debug/ccterm hook --out $CLAUDE_PROJECT_DIR/.claude/hooks/events.jsonl"
+          }
+        ]
+      }
+    ]
+  }
+}
