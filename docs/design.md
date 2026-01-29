@@ -16,6 +16,26 @@
 - Process management: start/stop Claude Code and monitor health
 - Transcript handling: read/tail/parse JSONL at `transcript_path`
 - tmux/Claude Code command: fixed; working directory is fixed
-- Error handling: notify Slack on errors (best effort)
+- Error handling: coordinator forwards errors to conversation message sending (best effort)
 - Configuration: TOML (no required keys for minimal setup)
 - Deployment: standalone binary (direct execution)
+
+## Domain Model
+- Conversation: external chat unit (main timeline and threads), owns message sending
+- Terminal Session: tmux session and Claude Code process lifecycle
+- Claude Context: snapshot/transcript reference used to seed a session
+
+## Module Responsibilities (by domain)
+- Conversation modules:
+  - Adapter input: map platform events to Conversation messages
+  - Adapter output: send messages via Conversation
+- Terminal Session modules:
+  - tmux control and process supervision
+  - command execution within the fixed working directory
+- Claude Context modules:
+  - read/tail/parse JSONL transcript
+  - snapshot at thread start and seed new sessions
+- Coordinator:
+  - bind Conversation, Terminal Session, and Claude Context
+  - decide when to spawn or reuse sessions
+  - route errors to Conversation message sending
