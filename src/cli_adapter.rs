@@ -26,6 +26,7 @@ pub fn parse_input(line: &str) -> Result<IncomingMessage> {
             text,
             conversation_id: DEFAULT_CONVERSATION_ID.to_string(),
             thread_id: Some(thread_id),
+            timestamp: None,
         });
     }
 
@@ -33,6 +34,7 @@ pub fn parse_input(line: &str) -> Result<IncomingMessage> {
         text: trimmed.to_string(),
         conversation_id: DEFAULT_CONVERSATION_ID.to_string(),
         thread_id: None,
+        timestamp: None,
     })
 }
 

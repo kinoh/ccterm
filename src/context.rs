@@ -36,6 +36,30 @@ pub fn latest_assistant_text(path: &Path) -> Result<Option<String>> {
     Ok(text)
 }
 
+pub fn format_history_prompt(history: &[TranscriptMessage]) -> Option<String> {
+    if history.is_empty() {
+        return None;
+    }
+
+    let mut out = String::new();
+    out.push_str("Conversation so far:\n");
+    for msg in history {
+        match msg.role {
+            Role::User => {
+                out.push_str("User: ");
+                out.push_str(&msg.text);
+            }
+            Role::Assistant => {
+                out.push_str("Assistant: ");
+                out.push_str(&msg.text);
+            }
+        }
+        out.push('\n');
+    }
+    out.push_str("\nDo not respond to this message. Wait for the next user input.\n");
+    Some(out)
+}
+
 fn parse_transcript_line(value: &Value, cutoff_ts: Option<&str>) -> Result<Option<TranscriptMessage>> {
     let line_type = value
         .get("type")

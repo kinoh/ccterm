@@ -17,6 +17,7 @@ pub struct IncomingMessage {
     pub text: String,
     pub conversation_id: String,
     pub thread_id: Option<String>,
+    pub timestamp: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

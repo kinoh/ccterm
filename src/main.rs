@@ -1,10 +1,15 @@
+mod config;
+mod coordinator;
 mod cli_adapter;
 mod context;
 mod hooks;
 mod sessions;
+mod slack_adapter;
 mod types;
 
 use anyhow::{Context, Result};
+use config::Config;
+use coordinator::Coordinator;
 use std::env;
 use std::io::BufRead;
 use std::path::PathBuf;
@@ -15,7 +20,8 @@ const DEFAULT_TIMEOUT_SECS: u64 = 180;
 const DEFAULT_PREFIX: &str = "ccterm";
 const DEFAULT_CLAUDE_CMD: &str = "claude";
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     let mut args: Vec<String> = env::args().collect();
     let _bin = args.remove(0);
     if args.is_empty() {
@@ -27,6 +33,7 @@ fn main() -> Result<()> {
         "hook" => run_hook(&args[1..]),
         "run" => run_session(&args[1..]),
         "cli" => run_cli(&args[1..]),
+        "serve" => run_serve(&args[1..]).await,
         "help" | "-h" | "--help" => {
             print_usage();
             Ok(())
@@ -394,8 +401,44 @@ fn extract_transcript_path(hook_line: &str) -> Result<PathBuf> {
     Ok(PathBuf::from(path))
 }
 
+async fn run_serve(args: &[String]) -> Result<()> {
+    let mut config_path: Option<PathBuf> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--config" => {
+                let value = args.get(i + 1).context("--config requires a value")?;
+                config_path = Some(PathBuf::from(value));
+                i += 2;
+            }
+            "--help" | "-h" => {
+                print_serve_usage();
+                return Ok(());
+            }
+            other => {
+                return Err(anyhow::anyhow!("unknown serve argument: {other}"));
+            }
+        }
+    }
+
+    let config_path = config_path.unwrap_or_else(|| PathBuf::from("ccterm.toml"));
+    let config = Config::load(&config_path)?;
+
+    sessions::ensure_tmux_available()?;
+    sessions::ensure_claude_available(&config.claude.command)?;
+    sessions::ensure_dir(&config.hooks.events_path)?;
+
+    let slack = slack_adapter::SlackAdapter::connect(&config.slack).await?;
+    let hooks_rx = hooks::spawn_hook_receiver(config.hooks.events_path.clone());
+    let sessions = sessions::TmuxSessionManager::new(&config.claude.command, &config.claude.cwd);
+
+    let coordinator = Coordinator::new(config, sessions, slack, hooks_rx);
+    coordinator.run().await?;
+    Ok(())
+}
+
 fn print_usage() {
-    eprintln!("ccterm usage:\n  ccterm run [options]\n  ccterm cli [options]\n  ccterm hook --out <path>");
+    eprintln!("ccterm usage:\n  ccterm run [options]\n  ccterm cli [options]\n  ccterm serve [options]\n  ccterm hook --out <path>");
 }
 
 fn print_run_usage() {
@@ -412,4 +455,8 @@ fn print_cli_usage() {
 
 fn print_hook_usage() {
     eprintln!("ccterm hook --out <path>");
+}
+
+fn print_serve_usage() {
+    eprintln!("ccterm serve options:\n  --config <path>");
 }

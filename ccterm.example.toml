@@ -1,0 +1,17 @@
+[slack]
+bot_token = "xoxb-REPLACE_ME"
+app_token = "xapp-REPLACE_ME"
+
+[claude]
+command = "claude"
+cwd = "."
+
+[tmux]
+session_prefix = "ccterm"
+
+[hooks]
+events_path = ".claude/hooks/events.jsonl"
+
+[coordinator]
+hook_timeout_secs = 10
+prompt_timeout_ms = 10000
