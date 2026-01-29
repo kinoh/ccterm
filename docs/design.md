@@ -39,3 +39,37 @@
   - bind Conversation, Terminal Session, and Claude Context
   - decide when to spawn or reuse sessions
   - route errors to Conversation message sending
+
+## Interfaces (Draft)
+- Core types:
+  - `ConversationId`, `ThreadId`, `SessionId`, `UserId`
+  - `Message { text, user_id, conversation_id, thread_id?, ts }`
+  - `OutgoingMessage { text, conversation_id, thread_id?, attachments? }`
+  - `ContextSnapshot { session_id, transcript_path, cutoff_ts }`
+  - `HookEvent { kind, transcript_path, session_id, payload }`
+- Conversation:
+  - `ConversationInput.subscribe() -> Stream<Message>`
+  - `ConversationOutput.send(OutgoingMessage) -> Result<()>`
+  - `ConversationAdapter.input() -> ConversationInput`
+  - `ConversationAdapter.output() -> ConversationOutput`
+- Slack adapter (Socket Mode):
+  - `SlackAdapter.connect(app_token, bot_token) -> Result<Self>`
+  - `SlackAdapter.subscribe_app_mentions() -> Stream<Message>`
+  - `SlackAdapter.post_message(OutgoingMessage) -> Result<()>`
+- Terminal Session:
+  - `TerminalSessionManager.spawn(seed: ContextSnapshot, cwd: Path) -> Result<SessionHandle>`
+  - `TerminalSessionManager.attach(session_id) -> Result<SessionHandle>`
+  - `TerminalSessionManager.send(session_id, text) -> Result<()>`
+  - `TerminalSessionManager.stop(session_id) -> Result<()>`
+  - `TerminalSessionManager.health(session_id) -> Result<Health>`
+- Claude Context:
+  - `TranscriptReader.follow(path: Path) -> Stream<TranscriptEvent>`
+  - `TranscriptReader.parse(event) -> Result<ClaudeEvent>`
+  - `SnapshotManager.snapshot_at_thread_start(conversation_id, thread_id) -> Result<ContextSnapshot>`
+  - `SnapshotManager.resolve_snapshot(session_id) -> Result<ContextSnapshot>`
+- Hooks:
+  - `HookReceiver.subscribe() -> Stream<HookEvent>`
+  - `HookEventRouter.route_to_output(event, output) -> Result<()>`
+- Coordinator:
+  - `Coordinator.run(input, hooks, sessions, context, output)`
+  - Rules: main timeline uses shared session; thread reply spawns session from snapshot; thread replies reuse thread session; errors route to Conversation output
