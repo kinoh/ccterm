@@ -38,7 +38,7 @@ impl TmuxSessionManager {
         Ok(())
     }
 
-    pub fn send(&self, session_name: &str, text: &str) -> Result<()> {
+    pub fn send_text(&self, session_name: &str, text: &str) -> Result<()> {
         let status = Command::new("tmux")
             .args([
                 "send-keys",
@@ -165,23 +165,20 @@ fn prompt_ready(pane: &str) -> bool {
         .lines()
         .map(|line| line.replace('\u{00A0}', " "))
         .collect();
-    let tail = lines.iter().rev().take(12);
 
-    if tail.clone().any(|line| line.contains("esc to interrupt")) {
-        return false;
-    }
-
-    for line in tail {
+    for line in lines.iter().rev().take(20) {
         let trimmed = line.trim_start();
         if let Some(rest) = trimmed.strip_prefix('❯') {
-            if rest.trim().is_empty() {
-                return true;
+            if rest.contains("esc to interrupt") {
+                return false;
             }
+            return true;
         }
         if let Some(rest) = trimmed.strip_prefix('>') {
-            if rest.trim().is_empty() {
-                return true;
+            if rest.contains("esc to interrupt") {
+                return false;
             }
+            return true;
         }
     }
     false
