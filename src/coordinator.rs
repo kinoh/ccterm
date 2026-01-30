@@ -5,6 +5,7 @@ use crate::sessions::{self, TmuxSessionManager};
 use crate::slack_adapter::SlackAdapter;
 use crate::types::{IncomingMessage, OutgoingMessage};
 use anyhow::{Context, Result};
+use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -41,6 +42,7 @@ pub struct Coordinator {
     hook_paths_by_cwd: HashMap<PathBuf, PathBuf>,
     settings_template: String,
     base_cwd: PathBuf,
+    ccterm_path: PathBuf,
 }
 
 impl Coordinator {
@@ -53,6 +55,9 @@ impl Coordinator {
                 settings_path.display()
             )
         })?;
+        let ccterm_path = std::env::current_exe()
+            .context("failed to resolve ccterm path")?;
+        let ccterm_path = ccterm_path.canonicalize().unwrap_or(ccterm_path);
 
         let (hook_tx, hook_rx) = mpsc::unbounded_channel();
         Ok(Self {
@@ -68,6 +73,7 @@ impl Coordinator {
             hook_paths_by_cwd: HashMap::new(),
             settings_template,
             base_cwd,
+            ccterm_path,
         })
     }
 
@@ -343,7 +349,8 @@ impl Coordinator {
             .with_context(|| format!("failed to create .claude dir: {}", claude_dir.display()))?;
         let settings_path = claude_dir.join("settings.json");
         if !settings_path.exists() {
-            std::fs::write(&settings_path, &self.settings_template).with_context(|| {
+            let settings = self.render_thread_settings()?;
+            std::fs::write(&settings_path, settings).with_context(|| {
                 format!(
                     "failed to write thread settings.json: {}",
                     settings_path.display()
@@ -351,6 +358,17 @@ impl Coordinator {
             })?;
         }
         Ok(normalize_path(dir))
+    }
+
+    fn render_thread_settings(&self) -> Result<String> {
+        let mut settings: Value = serde_json::from_str(&self.settings_template)
+            .context("failed to parse base settings.json")?;
+        let exe_path = self.ccterm_path.to_string_lossy();
+        rewrite_hook_commands(&mut settings, &exe_path);
+        let mut out =
+            serde_json::to_string_pretty(&settings).context("failed to render settings.json")?;
+        out.push('\n');
+        Ok(out)
     }
 }
 
@@ -363,4 +381,46 @@ fn sanitize_thread_id(thread_id: &str) -> String {
 
 fn normalize_path(path: PathBuf) -> PathBuf {
     path.canonicalize().unwrap_or(path)
+}
+
+fn rewrite_hook_commands(settings: &mut Value, exe_path: &str) {
+    let hooks = match settings.get_mut("hooks").and_then(Value::as_object_mut) {
+        Some(hooks) => hooks,
+        None => return,
+    };
+
+    for entry in hooks.values_mut() {
+        let Some(entries) = entry.as_array_mut() else {
+            continue;
+        };
+        for entry in entries.iter_mut() {
+            let Some(hook_list) = entry.get_mut("hooks").and_then(Value::as_array_mut) else {
+                continue;
+            };
+            for hook in hook_list.iter_mut() {
+                let Some(command_value) = hook.get_mut("command") else {
+                    continue;
+                };
+                let Some(command) = command_value.as_str() else {
+                    continue;
+                };
+                let updated = replace_ccterm_command(command, exe_path);
+                if updated != command {
+                    *command_value = Value::String(updated);
+                }
+            }
+        }
+    }
+}
+
+fn replace_ccterm_command(command: &str, exe_path: &str) -> String {
+    let debug_path = "$CLAUDE_PROJECT_DIR/target/debug/ccterm";
+    let release_path = "$CLAUDE_PROJECT_DIR/target/release/ccterm";
+    if command.contains(debug_path) {
+        return command.replace(debug_path, exe_path);
+    }
+    if command.contains(release_path) {
+        return command.replace(release_path, exe_path);
+    }
+    command.to_string()
 }
