@@ -155,6 +155,7 @@ pub fn wait_for_prompt(
     loop {
         let pane = manager.capture_pane(session_name, 200)?;
         if prompt_ready(&pane) {
+            std::thread::sleep(Duration::from_millis(500));
             return Ok(());
         }
         if start.elapsed() > timeout {
