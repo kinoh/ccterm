@@ -34,6 +34,9 @@ impl SlackAdapter {
         );
 
         let callbacks = SlackSocketModeListenerCallbacks::new()
+            .with_hello_events(|event, _client, _state| async move {
+                eprintln!("slack: hello {:?}", event);
+            })
             .with_push_events(push_events_callback::<SlackClientHyperHttpsConnector>);
 
         let socket_mode_config = SlackClientSocketModeConfig::new();
@@ -122,19 +125,30 @@ where
             .ok_or_else(|| "missing slack bridge")?
     };
 
-    if let SlackEventCallbackBody::AppMention(app_mention) = event.event {
-        eprintln!("slack: received app_mention event");
+    match event.event {
+        SlackEventCallbackBody::AppMention(app_mention) => {
+            eprintln!("slack: received app_mention event");
+        let channel_from_event = app_mention.channel.to_string();
         let text = app_mention
             .content
             .text
             .unwrap_or_else(|| "".to_string());
-        let channel = app_mention
+        let channel_from_origin = app_mention
             .origin
             .channel
             .map(|c| c.to_string())
             .unwrap_or_default();
+        let channel = channel_from_origin.clone();
         let thread_id = app_mention.origin.thread_ts.map(|ts| ts.to_string());
         let timestamp = Some(app_mention.origin.ts.to_string());
+
+        eprintln!(
+            "slack: app_mention fields channel(event)={} channel(origin)={} thread={} text_len={}",
+            channel_from_event,
+            channel_from_origin,
+            thread_id.as_deref().unwrap_or("-"),
+            text.len()
+        );
 
         if !text.trim().is_empty() && !channel.is_empty() {
             eprintln!(
@@ -142,18 +156,29 @@ where
                 channel,
                 thread_id.as_deref().unwrap_or("-")
             );
-            let _ = bridge.tx.send(IncomingMessage {
+            if bridge
+                .tx
+                .send(IncomingMessage {
                 text,
                 conversation_id: channel,
                 thread_id,
                 timestamp,
-            });
+            })
+                .is_err()
+            {
+                eprintln!("slack: failed to enqueue incoming message");
+            }
         } else {
             eprintln!(
-                "slack: app_mention ignored (empty text or channel) channel={} text_len={}",
-                channel,
+                "slack: app_mention ignored (empty text or channel) channel(event)={} channel(origin)={} text_len={}",
+                channel_from_event,
+                channel_from_origin,
                 text.len()
             );
+        }
+        }
+        other => {
+            eprintln!("slack: received event {:?}", other);
         }
     }
 

@@ -82,6 +82,12 @@ impl Coordinator {
                         Some(m) => m,
                         None => break,
                     };
+                    eprintln!(
+                        "coordinator: incoming slack message channel={} thread={} text_len={}",
+                        msg.conversation_id,
+                        msg.thread_id.as_deref().unwrap_or("-"),
+                        msg.text.len()
+                    );
                     if let Err(err) = self.handle_incoming(msg, prompt_timeout).await {
                         eprintln!("incoming error: {err}");
                     }
