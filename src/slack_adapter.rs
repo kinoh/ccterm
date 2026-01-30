@@ -19,6 +19,7 @@ pub struct SlackAdapter {
 
 impl SlackAdapter {
     pub async fn connect(cfg: &SlackConfig) -> Result<Self> {
+        eprintln!("slack: connecting (socket mode)");
         let (tx, rx) = mpsc::unbounded_channel();
         let connector = SlackClientHyperHttpsConnector::new()
             .context("failed to create slack hyper connector")?;
@@ -43,9 +44,12 @@ impl SlackAdapter {
             .listen_for(&app_token)
             .await
             .context("failed to register socket mode listener")?;
+        eprintln!("slack: socket mode listener registered");
 
         tokio::spawn(async move {
+            eprintln!("slack: socket mode listener starting");
             socket_mode_listener.start().await;
+            eprintln!("slack: socket mode listener stopped");
         });
 
         Ok(SlackAdapter {
@@ -60,6 +64,11 @@ impl SlackAdapter {
     }
 
     pub async fn send(&self, message: &OutgoingMessage) -> Result<()> {
+        eprintln!(
+            "slack: sending message channel={} thread={}",
+            message.conversation_id,
+            message.thread_id.as_deref().unwrap_or("-")
+        );
         let session = self.client.open_session(&self.bot_token);
         let mut req = SlackApiChatPostMessageRequest {
             channel: SlackChannelId(message.conversation_id.clone()),
@@ -92,6 +101,7 @@ impl SlackAdapter {
             .chat_post_message(&req)
             .await
             .context("failed to post slack message")?;
+        eprintln!("slack: sent message");
         Ok(())
     }
 }
@@ -113,6 +123,7 @@ where
     };
 
     if let SlackEventCallbackBody::AppMention(app_mention) = event.event {
+        eprintln!("slack: received app_mention event");
         let text = app_mention
             .content
             .text
@@ -126,12 +137,23 @@ where
         let timestamp = Some(app_mention.origin.ts.to_string());
 
         if !text.trim().is_empty() && !channel.is_empty() {
+            eprintln!(
+                "slack: app_mention -> incoming channel={} thread={}",
+                channel,
+                thread_id.as_deref().unwrap_or("-")
+            );
             let _ = bridge.tx.send(IncomingMessage {
                 text,
                 conversation_id: channel,
                 thread_id,
                 timestamp,
             });
+        } else {
+            eprintln!(
+                "slack: app_mention ignored (empty text or channel) channel={} text_len={}",
+                channel,
+                text.len()
+            );
         }
     }
 
