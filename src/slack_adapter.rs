@@ -51,7 +51,7 @@ impl SlackAdapter {
 
         tokio::spawn(async move {
             eprintln!("slack: socket mode listener starting");
-            socket_mode_listener.start().await;
+            socket_mode_listener.serve().await;
             eprintln!("slack: socket mode listener stopped");
         });
 
