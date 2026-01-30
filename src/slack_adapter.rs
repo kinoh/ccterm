@@ -138,7 +138,11 @@ where
             .channel
             .map(|c| c.to_string())
             .unwrap_or_default();
-        let channel = channel_from_origin.clone();
+        let channel = if channel_from_origin.is_empty() {
+            channel_from_event.clone()
+        } else {
+            channel_from_origin.clone()
+        };
         let thread_id = app_mention.origin.thread_ts.map(|ts| ts.to_string());
         let timestamp = Some(app_mention.origin.ts.to_string());
 
