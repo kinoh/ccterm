@@ -16,6 +16,8 @@
 - Process management: start/stop Claude Code and monitor health
 - Transcript handling: read/tail/parse JSONL at `transcript_path`
 - tmux/Claude Code command: fixed; working directory is fixed
+- Thread sessions: run in per-thread subdirectories under the base working directory
+- Hook routing: match sessions by hook `cwd`
 - Error handling: coordinator forwards errors to conversation message sending (best effort)
 - Configuration: TOML (Slack bot token and app token are required)
 - Deployment: standalone binary (direct execution)

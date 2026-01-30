@@ -426,13 +426,11 @@ async fn run_serve(args: &[String]) -> Result<()> {
 
     sessions::ensure_tmux_available()?;
     sessions::ensure_claude_available(&config.claude.command)?;
-    sessions::ensure_dir(&config.hooks.events_path)?;
 
     let slack = slack_adapter::SlackAdapter::connect(&config.slack).await?;
-    let hooks_rx = hooks::spawn_hook_receiver(config.hooks.events_path.clone());
     let sessions = sessions::TmuxSessionManager::new(&config.claude.command, &config.claude.cwd);
 
-    let coordinator = Coordinator::new(config, sessions, slack, hooks_rx);
+    let coordinator = Coordinator::new(config, sessions, slack)?;
     coordinator.run().await?;
     Ok(())
 }

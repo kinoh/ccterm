@@ -88,6 +88,7 @@ pub struct HookEvent {
     pub event_name: String,
     pub session_id: String,
     pub transcript_path: PathBuf,
+    pub cwd: PathBuf,
 }
 
 #[derive(Debug, Deserialize)]
@@ -97,6 +98,7 @@ struct HookPayload {
     session_id: String,
     transcript_path: Option<String>,
     agent_transcript_path: Option<String>,
+    cwd: Option<String>,
 }
 
 pub fn parse_hook_line(line: &str) -> Result<HookEvent> {
@@ -106,11 +108,13 @@ pub fn parse_hook_line(line: &str) -> Result<HookEvent> {
         .transcript_path
         .or(payload.agent_transcript_path)
         .context("missing transcript_path")?;
+    let cwd = payload.cwd.context("missing cwd")?;
 
     Ok(HookEvent {
         event_name: payload.event_name,
         session_id: payload.session_id,
         transcript_path: PathBuf::from(transcript_path),
+        cwd: PathBuf::from(cwd),
     })
 }
 

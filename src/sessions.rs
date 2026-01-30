@@ -17,6 +17,10 @@ impl TmuxSessionManager {
     }
 
     pub fn spawn(&self, session_name: &str) -> Result<()> {
+        self.spawn_in(session_name, &self.cwd)
+    }
+
+    pub fn spawn_in(&self, session_name: &str, cwd: &Path) -> Result<()> {
         let status = Command::new("tmux")
             .args([
                 "new-session",
@@ -24,8 +28,7 @@ impl TmuxSessionManager {
                 "-s",
                 session_name,
                 "-c",
-                self.cwd
-                    .to_str()
+                cwd.to_str()
                     .context("failed to convert cwd to string")?,
                 &self.claude_cmd,
             ])

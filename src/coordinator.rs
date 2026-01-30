@@ -1,12 +1,12 @@
 use crate::config::Config;
 use crate::context;
-use crate::hooks::HookEvent;
+use crate::hooks::{self, HookEvent};
 use crate::sessions::{self, TmuxSessionManager};
 use crate::slack_adapter::SlackAdapter;
 use crate::types::{IncomingMessage, OutgoingMessage};
 use anyhow::{Context, Result};
 use std::collections::{HashMap, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::sync::mpsc;
 
@@ -19,12 +19,12 @@ struct ConversationKey {
 #[derive(Debug, Clone)]
 struct SessionEntry {
     session_name: String,
+    cwd: PathBuf,
     last_transcript_path: Option<PathBuf>,
 }
 
 #[derive(Debug)]
 struct PendingRequest {
-    key: ConversationKey,
     suppress_output: bool,
 }
 
@@ -32,33 +32,48 @@ pub struct Coordinator {
     config: Config,
     sessions: TmuxSessionManager,
     slack: SlackAdapter,
-    hooks_rx: mpsc::UnboundedReceiver<HookEvent>,
-    pending: VecDeque<PendingRequest>,
+    hook_tx: mpsc::UnboundedSender<HookEvent>,
+    hook_rx: mpsc::UnboundedReceiver<HookEvent>,
+    pending_by_cwd: HashMap<PathBuf, VecDeque<PendingRequest>>,
     sessions_by_key: HashMap<ConversationKey, SessionEntry>,
+    key_by_cwd: HashMap<PathBuf, ConversationKey>,
     main_by_conversation: HashMap<String, ConversationKey>,
+    hook_paths_by_cwd: HashMap<PathBuf, PathBuf>,
+    settings_template: String,
+    base_cwd: PathBuf,
 }
 
 impl Coordinator {
-    pub fn new(
-        config: Config,
-        sessions: TmuxSessionManager,
-        slack: SlackAdapter,
-        hooks_rx: mpsc::UnboundedReceiver<HookEvent>,
-    ) -> Self {
-        Self {
+    pub fn new(config: Config, sessions: TmuxSessionManager, slack: SlackAdapter) -> Result<Self> {
+        let base_cwd = normalize_path(config.claude.cwd.clone());
+        let settings_path = base_cwd.join(".claude/settings.json");
+        let settings_template = std::fs::read_to_string(&settings_path).with_context(|| {
+            format!(
+                "failed to read base settings.json: {}",
+                settings_path.display()
+            )
+        })?;
+
+        let (hook_tx, hook_rx) = mpsc::unbounded_channel();
+        Ok(Self {
             config,
             sessions,
             slack,
-            hooks_rx,
-            pending: VecDeque::new(),
+            hook_tx,
+            hook_rx,
+            pending_by_cwd: HashMap::new(),
             sessions_by_key: HashMap::new(),
+            key_by_cwd: HashMap::new(),
             main_by_conversation: HashMap::new(),
-        }
+            hook_paths_by_cwd: HashMap::new(),
+            settings_template,
+            base_cwd,
+        })
     }
 
     pub async fn run(mut self) -> Result<()> {
-        let hook_timeout = Duration::from_secs(self.config.coordinator.hook_timeout_secs);
         let prompt_timeout = Duration::from_millis(self.config.coordinator.prompt_timeout_ms);
+        let _hook_timeout = Duration::from_secs(self.config.coordinator.hook_timeout_secs);
 
         loop {
             tokio::select! {
@@ -67,11 +82,11 @@ impl Coordinator {
                         Some(m) => m,
                         None => break,
                     };
-                    if let Err(err) = self.handle_incoming(msg, prompt_timeout, hook_timeout).await {
+                    if let Err(err) = self.handle_incoming(msg, prompt_timeout).await {
                         eprintln!("incoming error: {err}");
                     }
                 }
-                maybe_hook = self.hooks_rx.recv() => {
+                maybe_hook = self.hook_rx.recv() => {
                     if let Some(hook) = maybe_hook {
                         if let Err(err) = self.handle_hook(hook).await {
                             eprintln!("hook error: {err}");
@@ -83,23 +98,13 @@ impl Coordinator {
         Ok(())
     }
 
-    async fn handle_incoming(
-        &mut self,
-        msg: IncomingMessage,
-        prompt_timeout: Duration,
-        _hook_timeout: Duration,
-    ) -> Result<()> {
-        let key = ConversationKey {
-            conversation_id: msg.conversation_id.clone(),
-            thread_id: msg.thread_id.clone(),
-        };
-
+    async fn handle_incoming(&mut self, msg: IncomingMessage, prompt_timeout: Duration) -> Result<()> {
         if msg.thread_id.is_none() {
             let entry = self.ensure_main_session(&msg, prompt_timeout)?;
-            self.enqueue_send(&entry.session_name, msg.text, &key, false, prompt_timeout)?;
+            self.enqueue_send(&entry, msg.text, false, prompt_timeout)?;
         } else {
             let entry = self.ensure_thread_session(&msg, prompt_timeout)?;
-            self.enqueue_send(&entry.session_name, msg.text, &key, false, prompt_timeout)?;
+            self.enqueue_send(&entry, msg.text, false, prompt_timeout)?;
         }
 
         Ok(())
@@ -123,9 +128,13 @@ impl Coordinator {
             return Ok(entry.clone());
         }
 
+        let cwd = self.base_cwd.clone();
+        let hook_path = self.hook_path_for_cwd(&cwd);
+        self.register_hook_receiver(&cwd, &hook_path)?;
+
         let session_name = sessions::timestamp_session_name(&self.config.tmux.session_prefix)?;
         self.sessions
-            .spawn(&session_name)
+            .spawn_in(&session_name, &cwd)
             .with_context(|| format!("failed to spawn main session {session_name}"))?;
         sessions::wait_for_prompt(
             &self.sessions,
@@ -136,9 +145,11 @@ impl Coordinator {
 
         let entry = SessionEntry {
             session_name: session_name.clone(),
+            cwd: cwd.clone(),
             last_transcript_path: None,
         };
-        self.sessions_by_key.insert(key, entry.clone());
+        self.sessions_by_key.insert(key.clone(), entry.clone());
+        self.key_by_cwd.insert(cwd, key);
         Ok(entry)
     }
 
@@ -156,9 +167,17 @@ impl Coordinator {
             return Ok(entry.clone());
         }
 
+        let thread_id = msg
+            .thread_id
+            .as_deref()
+            .context("thread id missing")?;
+        let cwd = self.ensure_thread_dir(thread_id)?;
+        let hook_path = self.hook_path_for_cwd(&cwd);
+        self.register_hook_receiver(&cwd, &hook_path)?;
+
         let session_name = sessions::timestamp_session_name(&self.config.tmux.session_prefix)?;
         self.sessions
-            .spawn(&session_name)
+            .spawn_in(&session_name, &cwd)
             .with_context(|| format!("failed to spawn thread session {session_name}"))?;
 
         sessions::wait_for_prompt(
@@ -169,20 +188,20 @@ impl Coordinator {
         )?;
 
         if let Some(seed) = self.build_thread_seed(msg)? {
-            self.enqueue_send(
-                &session_name,
-                seed,
-                &key,
-                true,
-                prompt_timeout,
-            )?;
+            self.enqueue_send(&SessionEntry {
+                session_name: session_name.clone(),
+                cwd: cwd.clone(),
+                last_transcript_path: None,
+            }, seed, true, prompt_timeout)?;
         }
 
         let entry = SessionEntry {
             session_name: session_name.clone(),
+            cwd: cwd.clone(),
             last_transcript_path: None,
         };
         self.sessions_by_key.insert(key.clone(), entry.clone());
+        self.key_by_cwd.insert(cwd, key);
         Ok(entry)
     }
 
@@ -208,42 +227,50 @@ impl Coordinator {
 
     fn enqueue_send(
         &mut self,
-        session_name: &str,
+        entry: &SessionEntry,
         text: String,
-        key: &ConversationKey,
         suppress_output: bool,
         prompt_timeout: Duration,
     ) -> Result<()> {
         sessions::wait_for_prompt(
             &self.sessions,
-            session_name,
+            &entry.session_name,
             prompt_timeout,
             Duration::from_millis(200),
         )?;
         self.sessions
-            .send(session_name, &text)
-            .with_context(|| format!("failed to send to {session_name}"))?;
-        self.pending.push_back(PendingRequest {
-            key: key.clone(),
-            suppress_output,
-        });
+            .send(&entry.session_name, &text)
+            .with_context(|| format!("failed to send to {}", entry.session_name))?;
+        let queue = self
+            .pending_by_cwd
+            .entry(normalize_path(entry.cwd.clone()))
+            .or_default();
+        queue.push_back(PendingRequest { suppress_output });
         Ok(())
     }
 
     async fn handle_hook(&mut self, hook: HookEvent) -> Result<()> {
-        let pending = match self.pending.pop_front() {
+        let cwd = normalize_path(hook.cwd.clone());
+        let key = match self.key_by_cwd.get(&cwd) {
+            Some(k) => k.clone(),
+            None => {
+                eprintln!("hook cwd not registered: {}", cwd.display());
+                return Ok(());
+            }
+        };
+
+        let pending = match self.pending_by_cwd.get_mut(&cwd).and_then(|q| q.pop_front()) {
             Some(p) => p,
             None => {
                 eprintln!(
                     "received hook with no pending request: {} ({})",
-                    hook.event_name,
-                    hook.session_id
+                    hook.event_name, hook.session_id
                 );
                 return Ok(());
             }
         };
 
-        if let Some(entry) = self.sessions_by_key.get_mut(&pending.key) {
+        if let Some(entry) = self.sessions_by_key.get_mut(&key) {
             entry.last_transcript_path = Some(hook.transcript_path.clone());
         }
 
@@ -260,11 +287,74 @@ impl Coordinator {
 
         let outgoing = OutgoingMessage {
             text: assistant_text,
-            conversation_id: pending.key.conversation_id.clone(),
-            thread_id: pending.key.thread_id.clone(),
+            conversation_id: key.conversation_id.clone(),
+            thread_id: key.thread_id.clone(),
         };
 
         self.slack.send(&outgoing).await?;
         Ok(())
     }
+
+    fn hook_path_for_cwd(&self, cwd: &Path) -> PathBuf {
+        if self.config.hooks.events_path.is_absolute() {
+            self.config.hooks.events_path.clone()
+        } else {
+            cwd.join(&self.config.hooks.events_path)
+        }
+    }
+
+    fn register_hook_receiver(&mut self, cwd: &Path, hook_path: &Path) -> Result<()> {
+        let cwd = normalize_path(cwd.to_path_buf());
+        if self.hook_paths_by_cwd.contains_key(&cwd) {
+            return Ok(());
+        }
+
+        sessions::ensure_dir(hook_path)?;
+        let receiver = hooks::spawn_hook_receiver(hook_path.to_path_buf());
+        let tx = self.hook_tx.clone();
+        tokio::spawn(async move {
+            let mut rx = receiver;
+            while let Some(event) = rx.recv().await {
+                let _ = tx.send(event);
+            }
+        });
+
+        self.hook_paths_by_cwd
+            .insert(cwd, hook_path.to_path_buf());
+        Ok(())
+    }
+
+    fn ensure_thread_dir(&self, thread_id: &str) -> Result<PathBuf> {
+        let dir = self
+            .base_cwd
+            .join(".ccterm/threads")
+            .join(sanitize_thread_id(thread_id));
+        std::fs::create_dir_all(&dir)
+            .with_context(|| format!("failed to create thread dir: {}", dir.display()))?;
+
+        let claude_dir = dir.join(".claude");
+        std::fs::create_dir_all(&claude_dir)
+            .with_context(|| format!("failed to create .claude dir: {}", claude_dir.display()))?;
+        let settings_path = claude_dir.join("settings.json");
+        if !settings_path.exists() {
+            std::fs::write(&settings_path, &self.settings_template).with_context(|| {
+                format!(
+                    "failed to write thread settings.json: {}",
+                    settings_path.display()
+                )
+            })?;
+        }
+        Ok(normalize_path(dir))
+    }
+}
+
+fn sanitize_thread_id(thread_id: &str) -> String {
+    thread_id
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect()
+}
+
+fn normalize_path(path: PathBuf) -> PathBuf {
+    path.canonicalize().unwrap_or(path)
 }
