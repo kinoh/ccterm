@@ -3,12 +3,15 @@ use crate::types::{IncomingMessage, OutgoingMessage};
 use anyhow::{Context, Result};
 use slack_morphism::prelude::*;
 use slack_morphism::prelude::SlackClientHyperHttpsConnector;
+use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, RwLock};
 
 #[derive(Clone)]
 struct SlackBridge {
     tx: mpsc::UnboundedSender<IncomingMessage>,
+    bot_token: SlackApiToken,
+    user_cache: Arc<RwLock<HashMap<String, String>>>,
 }
 
 pub struct SlackAdapter {
@@ -28,9 +31,14 @@ impl SlackAdapter {
         let bot_token = SlackApiToken::new(SlackApiTokenValue(cfg.bot_token.clone()));
         let app_token = SlackApiToken::new(SlackApiTokenValue(cfg.app_token.clone()));
 
+        let user_cache = Arc::new(RwLock::new(HashMap::new()));
         let env = Arc::new(
             SlackClientEventsListenerEnvironment::new(client.clone())
-                .with_user_state(SlackBridge { tx }),
+                .with_user_state(SlackBridge {
+                    tx,
+                    bot_token: bot_token.clone(),
+                    user_cache,
+                }),
         );
 
         let callbacks = SlackSocketModeListenerCallbacks::new()
@@ -128,58 +136,68 @@ where
     match event.event {
         SlackEventCallbackBody::AppMention(app_mention) => {
             eprintln!("slack: received app_mention event");
-        let channel_from_event = app_mention.channel.to_string();
-        let text = app_mention
-            .content
-            .text
-            .unwrap_or_else(|| "".to_string());
-        let channel_from_origin = app_mention
-            .origin
-            .channel
-            .map(|c| c.to_string())
-            .unwrap_or_default();
-        let channel = if channel_from_origin.is_empty() {
-            channel_from_event.clone()
-        } else {
-            channel_from_origin.clone()
-        };
-        let thread_id = app_mention.origin.thread_ts.map(|ts| ts.to_string());
-        let timestamp = Some(app_mention.origin.ts.to_string());
+            let channel_from_event = app_mention.channel.to_string();
+            let raw_text = app_mention
+                .content
+                .text
+                .unwrap_or_else(|| "".to_string());
+            let channel_from_origin = app_mention
+                .origin
+                .channel
+                .map(|c| c.to_string())
+                .unwrap_or_default();
+            let channel = if channel_from_origin.is_empty() {
+                channel_from_event.clone()
+            } else {
+                channel_from_origin.clone()
+            };
+            let thread_id = app_mention.origin.thread_ts.map(|ts| ts.to_string());
+            let timestamp = Some(app_mention.origin.ts.to_string());
 
-        eprintln!(
-            "slack: app_mention fields channel(event)={} channel(origin)={} thread={} text_len={}",
-            channel_from_event,
-            channel_from_origin,
-            thread_id.as_deref().unwrap_or("-"),
-            text.len()
-        );
-
-        if !text.trim().is_empty() && !channel.is_empty() {
             eprintln!(
-                "slack: app_mention -> incoming channel={} thread={}",
-                channel,
-                thread_id.as_deref().unwrap_or("-")
-            );
-            if bridge
-                .tx
-                .send(IncomingMessage {
-                text,
-                conversation_id: channel,
-                thread_id,
-                timestamp,
-            })
-                .is_err()
-            {
-                eprintln!("slack: failed to enqueue incoming message");
-            }
-        } else {
-            eprintln!(
-                "slack: app_mention ignored (empty text or channel) channel(event)={} channel(origin)={} text_len={}",
+                "slack: app_mention fields channel(event)={} channel(origin)={} thread={} text_len={}",
                 channel_from_event,
                 channel_from_origin,
-                text.len()
+                thread_id.as_deref().unwrap_or("-"),
+                raw_text.len()
             );
-        }
+
+            if !raw_text.trim().is_empty() && !channel.is_empty() {
+                let display_name = resolve_user_display_name(
+                    _client.clone(),
+                    &bridge.bot_token,
+                    &bridge.user_cache,
+                    &app_mention.user,
+                )
+                .await
+                .unwrap_or_else(|| app_mention.user.to_string());
+                let text = format_incoming_text(&raw_text, &display_name);
+
+                eprintln!(
+                    "slack: app_mention -> incoming channel={} thread={}",
+                    channel,
+                    thread_id.as_deref().unwrap_or("-")
+                );
+                if bridge
+                    .tx
+                    .send(IncomingMessage {
+                        text,
+                        conversation_id: channel,
+                        thread_id,
+                        timestamp,
+                    })
+                    .is_err()
+                {
+                    eprintln!("slack: failed to enqueue incoming message");
+                }
+            } else {
+                eprintln!(
+                    "slack: app_mention ignored (empty text or channel) channel(event)={} channel(origin)={} text_len={}",
+                    channel_from_event,
+                    channel_from_origin,
+                    raw_text.len()
+                );
+            }
         }
         other => {
             eprintln!("slack: received event {:?}", other);
@@ -187,4 +205,71 @@ where
     }
 
     Ok(())
+}
+
+fn format_incoming_text(text: &str, display_name: &str) -> String {
+    let cleaned = strip_leading_mention(text);
+    let cleaned = cleaned.trim();
+    if cleaned.is_empty() {
+        return text.trim().to_string();
+    }
+    format!("{display_name}: {cleaned}")
+}
+
+fn strip_leading_mention(text: &str) -> String {
+    let trimmed = text.trim_start();
+    if !trimmed.starts_with("<@") {
+        return text.to_string();
+    }
+    let Some(end) = trimmed.find('>') else {
+        return text.to_string();
+    };
+    trimmed[end + 1..].trim_start().to_string()
+}
+
+async fn resolve_user_display_name<SCHC>(
+    client: Arc<SlackClient<SCHC>>,
+    bot_token: &SlackApiToken,
+    cache: &Arc<RwLock<HashMap<String, String>>>,
+    user_id: &SlackUserId,
+) -> Option<String>
+where
+    SCHC: SlackClientHttpConnector + Send + Sync + 'static,
+{
+    let key = user_id.to_string();
+    if let Some(name) = cache.read().await.get(&key).cloned() {
+        return Some(name);
+    }
+
+    let session = client.open_session(bot_token);
+    let req = SlackApiUsersInfoRequest::new(user_id.clone());
+    let resp = session.users_info(&req).await.ok()?;
+    let name = pick_display_name(&resp.user)?;
+
+    cache.write().await.insert(key, name.clone());
+    Some(name)
+}
+
+fn pick_display_name(user: &SlackUser) -> Option<String> {
+    if let Some(profile) = &user.profile {
+        if let Some(name) = normalize_name(profile.display_name.as_deref()) {
+            return Some(name);
+        }
+        if let Some(name) = normalize_name(profile.real_name.as_deref()) {
+            return Some(name);
+        }
+    }
+    if let Some(name) = normalize_name(user.real_name.as_deref()) {
+        return Some(name);
+    }
+    normalize_name(user.name.as_deref())
+}
+
+fn normalize_name(name: Option<&str>) -> Option<String> {
+    let name = name?.trim();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
+    }
 }

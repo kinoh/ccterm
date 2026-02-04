@@ -16,6 +16,7 @@ App-level token:
 Bot token:
 - `app_mentions:read`
 - `chat:write`
+- `users:read`
 
 Optional (only if posting to public channels without joining):
 - `chat:write.public`
