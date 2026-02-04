@@ -18,3 +18,4 @@ They also want the text to clearly indicate it is optional background.
 - On thread creation, generate `CLAUDE.md` if it does not already exist.
 - The file explicitly states that the context is optional and may be ignored.
 - Context is derived from the main conversation transcript up to the incoming message timestamp.
+- Log why `CLAUDE.md` was not written when context cannot be built.

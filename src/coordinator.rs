@@ -204,24 +204,31 @@ impl Coordinator {
         Ok(entry)
     }
 
-    fn build_thread_context(&self, msg: &IncomingMessage) -> Result<Option<String>> {
+    fn build_thread_context(&self, msg: &IncomingMessage) -> Result<ThreadContextDecision> {
         let main_key = self.main_by_conversation.get(&msg.conversation_id);
         let main_key = match main_key {
             Some(key) => key,
-            None => return Ok(None),
+            None => return Ok(ThreadContextDecision::Skipped("main conversation not found")),
         };
         let main_entry = match self.sessions_by_key.get(main_key) {
             Some(entry) => entry,
-            None => return Ok(None),
+            None => return Ok(ThreadContextDecision::Skipped("main session not available")),
         };
         let transcript_path = match &main_entry.last_transcript_path {
             Some(path) => path,
-            None => return Ok(None),
+            None => {
+                return Ok(ThreadContextDecision::Skipped(
+                    "main transcript not available yet",
+                ))
+            }
         };
 
         let cutoff = msg.timestamp.as_deref();
         let history = context::read_history(transcript_path, cutoff)?;
-        Ok(context::format_history_context(&history))
+        match context::format_history_context(&history) {
+            Some(context) => Ok(ThreadContextDecision::Built(context)),
+            None => Ok(ThreadContextDecision::Skipped("history empty")),
+        }
     }
 
     fn enqueue_send(
@@ -243,16 +250,26 @@ impl Coordinator {
     }
 
     fn ensure_thread_context(&self, cwd: &Path, msg: &IncomingMessage) -> Result<()> {
-        let context = match self.build_thread_context(msg)? {
-            Some(context) => context,
-            None => return Ok(()),
-        };
         let path = cwd.join("CLAUDE.md");
+        let decision = self.build_thread_context(msg)?;
+        let context = match decision {
+            ThreadContextDecision::Built(context) => context,
+            ThreadContextDecision::Skipped(reason) => {
+                eprintln!(
+                    "thread context not written: {} ({})",
+                    path.display(),
+                    reason
+                );
+                return Ok(());
+            }
+        };
         if path.exists() {
+            eprintln!("thread context exists, skip: {}", path.display());
             return Ok(());
         }
         std::fs::write(&path, context)
             .with_context(|| format!("failed to write CLAUDE.md: {}", path.display()))?;
+        eprintln!("thread context written: {}", path.display());
         Ok(())
     }
 
@@ -376,6 +393,11 @@ impl Coordinator {
         out.push('\n');
         Ok(out)
     }
+}
+
+enum ThreadContextDecision {
+    Built(String),
+    Skipped(&'static str),
 }
 
 fn sanitize_thread_id(thread_id: &str) -> String {
