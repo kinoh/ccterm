@@ -6,7 +6,7 @@ use crate::slack_adapter::SlackAdapter;
 use crate::types::{IncomingMessage, OutgoingMessage};
 use anyhow::{Context, Result};
 use serde_json::Value;
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -20,13 +20,8 @@ struct ConversationKey {
 #[derive(Debug, Clone)]
 struct SessionEntry {
     session_name: String,
-    cwd: PathBuf,
     last_transcript_path: Option<PathBuf>,
-}
-
-#[derive(Debug)]
-struct PendingRequest {
-    suppress_output: bool,
+    last_sent_transcript_path: Option<PathBuf>,
 }
 
 pub struct Coordinator {
@@ -35,7 +30,6 @@ pub struct Coordinator {
     slack: SlackAdapter,
     hook_tx: mpsc::UnboundedSender<HookEvent>,
     hook_rx: mpsc::UnboundedReceiver<HookEvent>,
-    pending_by_cwd: HashMap<PathBuf, VecDeque<PendingRequest>>,
     sessions_by_key: HashMap<ConversationKey, SessionEntry>,
     key_by_cwd: HashMap<PathBuf, ConversationKey>,
     main_by_conversation: HashMap<String, ConversationKey>,
@@ -66,7 +60,6 @@ impl Coordinator {
             slack,
             hook_tx,
             hook_rx,
-            pending_by_cwd: HashMap::new(),
             sessions_by_key: HashMap::new(),
             key_by_cwd: HashMap::new(),
             main_by_conversation: HashMap::new(),
@@ -113,10 +106,10 @@ impl Coordinator {
     async fn handle_incoming(&mut self, msg: IncomingMessage, prompt_timeout: Duration) -> Result<()> {
         if msg.thread_id.is_none() {
             let entry = self.ensure_main_session(&msg, prompt_timeout)?;
-            self.enqueue_send(&entry, msg.text, false, prompt_timeout)?;
+            self.enqueue_send(&entry, msg.text, prompt_timeout)?;
         } else {
             let entry = self.ensure_thread_session(&msg, prompt_timeout)?;
-            self.enqueue_send(&entry, msg.text, false, prompt_timeout)?;
+            self.enqueue_send(&entry, msg.text, prompt_timeout)?;
         }
 
         Ok(())
@@ -157,8 +150,8 @@ impl Coordinator {
 
         let entry = SessionEntry {
             session_name: session_name.clone(),
-            cwd: cwd.clone(),
             last_transcript_path: None,
+            last_sent_transcript_path: None,
         };
         self.sessions_by_key.insert(key.clone(), entry.clone());
         self.key_by_cwd.insert(cwd, key);
@@ -203,8 +196,8 @@ impl Coordinator {
 
         let entry = SessionEntry {
             session_name: session_name.clone(),
-            cwd: cwd.clone(),
             last_transcript_path: None,
+            last_sent_transcript_path: None,
         };
         self.sessions_by_key.insert(key.clone(), entry.clone());
         self.key_by_cwd.insert(cwd, key);
@@ -235,7 +228,6 @@ impl Coordinator {
         &mut self,
         entry: &SessionEntry,
         text: String,
-        suppress_output: bool,
         prompt_timeout: Duration,
     ) -> Result<()> {
         sessions::wait_for_prompt(
@@ -247,11 +239,6 @@ impl Coordinator {
         self.sessions
             .send(&entry.session_name, &text)
             .with_context(|| format!("failed to send to {}", entry.session_name))?;
-        let queue = self
-            .pending_by_cwd
-            .entry(normalize_path(entry.cwd.clone()))
-            .or_default();
-        queue.push_back(PendingRequest { suppress_output });
         Ok(())
     }
 
@@ -270,6 +257,10 @@ impl Coordinator {
     }
 
     async fn handle_hook(&mut self, hook: HookEvent) -> Result<()> {
+        if hook.event_name != "Stop" {
+            return Ok(());
+        }
+
         let cwd = normalize_path(hook.cwd.clone());
         let key = match self.key_by_cwd.get(&cwd) {
             Some(k) => k.clone(),
@@ -279,22 +270,16 @@ impl Coordinator {
             }
         };
 
-        let pending = match self.pending_by_cwd.get_mut(&cwd).and_then(|q| q.pop_front()) {
-            Some(p) => p,
+        let entry = match self.sessions_by_key.get_mut(&key) {
+            Some(entry) => entry,
             None => {
-                eprintln!(
-                    "received hook with no pending request: {} ({})",
-                    hook.event_name, hook.session_id
-                );
+                eprintln!("hook session not registered: {}", hook.session_id);
                 return Ok(());
             }
         };
+        entry.last_transcript_path = Some(hook.transcript_path.clone());
 
-        if let Some(entry) = self.sessions_by_key.get_mut(&key) {
-            entry.last_transcript_path = Some(hook.transcript_path.clone());
-        }
-
-        if pending.suppress_output {
+        if entry.last_sent_transcript_path.as_ref() == Some(&hook.transcript_path) {
             return Ok(());
         }
 
@@ -312,6 +297,7 @@ impl Coordinator {
         };
 
         self.slack.send(&outgoing).await?;
+        entry.last_sent_transcript_path = Some(hook.transcript_path.clone());
         Ok(())
     }
 
