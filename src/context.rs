@@ -36,13 +36,18 @@ pub fn latest_assistant_text(path: &Path) -> Result<Option<String>> {
     Ok(text)
 }
 
-pub fn format_history_prompt(history: &[TranscriptMessage]) -> Option<String> {
+pub fn format_history_context(history: &[TranscriptMessage]) -> Option<String> {
     if history.is_empty() {
         return None;
     }
 
     let mut out = String::new();
-    out.push_str("Conversation so far:\n");
+    out.push_str("# Optional Conversation Context\n\n");
+    out.push_str(
+        "This file provides background context to help interpret the user's next message.\n",
+    );
+    out.push_str("You do not need to focus on it unless it is useful.\n\n");
+    out.push_str("## Prior Messages\n");
     for msg in history {
         match msg.role {
             Role::User => {
@@ -56,7 +61,7 @@ pub fn format_history_prompt(history: &[TranscriptMessage]) -> Option<String> {
         }
         out.push('\n');
     }
-    out.push_str("\nDo not respond to this message. Wait for the next user input.\n");
+    out.push('\n');
     Some(out)
 }
 

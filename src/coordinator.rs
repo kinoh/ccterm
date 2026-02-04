@@ -199,13 +199,7 @@ impl Coordinator {
             Duration::from_millis(200),
         )?;
 
-        if let Some(seed) = self.build_thread_seed(msg)? {
-            self.enqueue_send(&SessionEntry {
-                session_name: session_name.clone(),
-                cwd: cwd.clone(),
-                last_transcript_path: None,
-            }, seed, true, prompt_timeout)?;
-        }
+        self.ensure_thread_context(&cwd, msg)?;
 
         let entry = SessionEntry {
             session_name: session_name.clone(),
@@ -217,7 +211,7 @@ impl Coordinator {
         Ok(entry)
     }
 
-    fn build_thread_seed(&self, msg: &IncomingMessage) -> Result<Option<String>> {
+    fn build_thread_context(&self, msg: &IncomingMessage) -> Result<Option<String>> {
         let main_key = self.main_by_conversation.get(&msg.conversation_id);
         let main_key = match main_key {
             Some(key) => key,
@@ -234,7 +228,7 @@ impl Coordinator {
 
         let cutoff = msg.timestamp.as_deref();
         let history = context::read_history(transcript_path, cutoff)?;
-        Ok(context::format_history_prompt(&history))
+        Ok(context::format_history_context(&history))
     }
 
     fn enqueue_send(
@@ -258,6 +252,20 @@ impl Coordinator {
             .entry(normalize_path(entry.cwd.clone()))
             .or_default();
         queue.push_back(PendingRequest { suppress_output });
+        Ok(())
+    }
+
+    fn ensure_thread_context(&self, cwd: &Path, msg: &IncomingMessage) -> Result<()> {
+        let context = match self.build_thread_context(msg)? {
+            Some(context) => context,
+            None => return Ok(()),
+        };
+        let path = cwd.join("CLAUDE.md");
+        if path.exists() {
+            return Ok(());
+        }
+        std::fs::write(&path, context)
+            .with_context(|| format!("failed to write CLAUDE.md: {}", path.display()))?;
         Ok(())
     }
 

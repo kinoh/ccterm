@@ -55,7 +55,7 @@ impl TmuxSessionManager {
         if !status.success() {
             bail!("tmux send-keys failed with status: {status}");
         }
-        std::thread::sleep(Duration::from_millis(5));
+        std::thread::sleep(Duration::from_millis(100));
         self.send_enter(session_name)?;
         Ok(())
     }
