@@ -4,7 +4,7 @@ use crate::hooks::{self, HookEvent};
 use crate::sessions::{self, TmuxSessionManager};
 use crate::slack_adapter::SlackAdapter;
 use crate::types::{IncomingMessage, OutgoingMessage};
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -287,6 +287,8 @@ impl Coordinator {
             }
         };
 
+        let latest = self.wait_for_latest_assistant(&hook)?;
+
         let entry = match self.sessions_by_key.get_mut(&key) {
             Some(entry) => entry,
             None => {
@@ -296,17 +298,6 @@ impl Coordinator {
         };
         entry.last_transcript_path = Some(hook.transcript_path.clone());
 
-        let latest = match context::latest_assistant_text_uuid(&hook.transcript_path)? {
-            Some(latest) => latest,
-            None => {
-                eprintln!(
-                    "hook stop but no assistant text found: session_id={} transcript={}",
-                    hook.session_id,
-                    hook.transcript_path.display()
-                );
-                return Ok(());
-            }
-        };
         if entry.last_sent_message_uuid.as_deref() == Some(latest.0.as_str()) {
             eprintln!(
                 "hook stop but assistant uuid unchanged: session_id={} uuid={} transcript={}",
@@ -328,6 +319,30 @@ impl Coordinator {
         self.slack.send(&outgoing).await?;
         entry.last_sent_message_uuid = Some(latest.0);
         Ok(())
+    }
+
+    fn wait_for_latest_assistant(
+        &self,
+        hook: &HookEvent,
+    ) -> Result<(String, String)> {
+        let mut attempt = 0;
+        let max_attempts = 8;
+        let delay = Duration::from_millis(150);
+        loop {
+            if let Some(latest) = context::latest_assistant_text_uuid(&hook.transcript_path)? {
+                return Ok(latest);
+            }
+            attempt += 1;
+            if attempt >= max_attempts {
+                bail!(
+                    "hook stop but no assistant text after {} attempts: session_id={} transcript={}",
+                    max_attempts,
+                    hook.session_id,
+                    hook.transcript_path.display()
+                );
+            }
+            std::thread::sleep(delay);
+        }
     }
 
     fn hook_path_for_cwd(&self, cwd: &Path) -> PathBuf {
