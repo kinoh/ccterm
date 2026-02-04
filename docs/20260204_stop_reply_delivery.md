@@ -23,5 +23,5 @@ The user explicitly stated that reply loss is the main problem and that intermed
 ## Implementation Notes
 - Treat only `Stop` as a send trigger.
 - Remove the pending queue gate from reply delivery.
-- Deduplicate by transcript path to avoid sending the same `Stop` twice.
+- Deduplicate by the latest assistant message UUID to avoid sending the same `Stop` twice.
 - Seeded context is replaced by optional thread context in `CLAUDE.md`.

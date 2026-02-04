@@ -21,7 +21,7 @@ struct ConversationKey {
 struct SessionEntry {
     session_name: String,
     last_transcript_path: Option<PathBuf>,
-    last_sent_transcript_path: Option<PathBuf>,
+    last_sent_message_uuid: Option<String>,
 }
 
 pub struct Coordinator {
@@ -151,7 +151,7 @@ impl Coordinator {
         let entry = SessionEntry {
             session_name: session_name.clone(),
             last_transcript_path: None,
-            last_sent_transcript_path: None,
+            last_sent_message_uuid: None,
         };
         self.sessions_by_key.insert(key.clone(), entry.clone());
         self.key_by_cwd.insert(cwd, key);
@@ -197,7 +197,7 @@ impl Coordinator {
         let entry = SessionEntry {
             session_name: session_name.clone(),
             last_transcript_path: None,
-            last_sent_transcript_path: None,
+            last_sent_message_uuid: None,
         };
         self.sessions_by_key.insert(key.clone(), entry.clone());
         self.key_by_cwd.insert(cwd, key);
@@ -279,16 +279,15 @@ impl Coordinator {
         };
         entry.last_transcript_path = Some(hook.transcript_path.clone());
 
-        if entry.last_sent_transcript_path.as_ref() == Some(&hook.transcript_path) {
+        let latest = match context::latest_assistant_text_uuid(&hook.transcript_path)? {
+            Some(latest) => latest,
+            None => return Ok(()),
+        };
+        if entry.last_sent_message_uuid.as_deref() == Some(latest.0.as_str()) {
             return Ok(());
         }
 
-        let assistant_text =
-            context::latest_assistant_text(&hook.transcript_path)?.unwrap_or_default();
-
-        if assistant_text.trim().is_empty() {
-            return Ok(());
-        }
+        let assistant_text = latest.1;
 
         let outgoing = OutgoingMessage {
             text: assistant_text,
@@ -297,7 +296,7 @@ impl Coordinator {
         };
 
         self.slack.send(&outgoing).await?;
-        entry.last_sent_transcript_path = Some(hook.transcript_path.clone());
+        entry.last_sent_message_uuid = Some(latest.0);
         Ok(())
     }
 

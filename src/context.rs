@@ -36,6 +36,42 @@ pub fn latest_assistant_text(path: &Path) -> Result<Option<String>> {
     Ok(text)
 }
 
+pub fn latest_assistant_text_uuid(path: &Path) -> Result<Option<(String, String)>> {
+    let file = File::open(path)
+        .with_context(|| format!("failed to open transcript: {}", path.display()))?;
+    let reader = BufReader::new(file);
+
+    let mut latest: Option<(String, String)> = None;
+    for line in reader.lines() {
+        let line = line.context("failed to read transcript line")?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let value: Value =
+            serde_json::from_str(&line).with_context(|| "failed to parse transcript JSON")?;
+        let line_type = value
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if line_type != "assistant" {
+            continue;
+        }
+        let message = value.get("message").unwrap_or(&Value::Null);
+        let content = message.get("content").unwrap_or(&Value::Null);
+        let text = extract_assistant_text(content);
+        let text = match text {
+            Some(text) if !text.trim().is_empty() => text,
+            _ => continue,
+        };
+        let uuid = match value.get("uuid").and_then(Value::as_str) {
+            Some(uuid) => uuid.to_string(),
+            None => continue,
+        };
+        latest = Some((uuid, text));
+    }
+    Ok(latest)
+}
+
 pub fn format_history_context(history: &[TranscriptMessage]) -> Option<String> {
     if history.is_empty() {
         return None;
