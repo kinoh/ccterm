@@ -289,6 +289,25 @@ impl Coordinator {
 
         let latest = self.wait_for_latest_assistant(&hook)?;
 
+        let last_sent_uuid = match self.sessions_by_key.get(&key) {
+            Some(entry) => entry.last_sent_message_uuid.clone(),
+            None => {
+                eprintln!("hook session not registered: {}", hook.session_id);
+                return Ok(());
+            }
+        };
+
+        let latest = self.wait_for_new_uuid(&hook, last_sent_uuid.as_deref(), latest)?;
+        if last_sent_uuid.as_deref() == Some(latest.0.as_str()) {
+            eprintln!(
+                "hook stop but assistant uuid unchanged after retry: session_id={} uuid={} transcript={}",
+                hook.session_id,
+                latest.0,
+                hook.transcript_path.display()
+            );
+            return Ok(());
+        }
+
         let entry = match self.sessions_by_key.get_mut(&key) {
             Some(entry) => entry,
             None => {
@@ -297,16 +316,6 @@ impl Coordinator {
             }
         };
         entry.last_transcript_path = Some(hook.transcript_path.clone());
-
-        if entry.last_sent_message_uuid.as_deref() == Some(latest.0.as_str()) {
-            eprintln!(
-                "hook stop but assistant uuid unchanged: session_id={} uuid={} transcript={}",
-                hook.session_id,
-                latest.0,
-                hook.transcript_path.display()
-            );
-            return Ok(());
-        }
 
         let assistant_text = latest.1;
 
@@ -340,6 +349,36 @@ impl Coordinator {
                     hook.session_id,
                     hook.transcript_path.display()
                 );
+            }
+            std::thread::sleep(delay);
+        }
+    }
+
+    fn wait_for_new_uuid(
+        &self,
+        hook: &HookEvent,
+        last_uuid: Option<&str>,
+        initial: (String, String),
+    ) -> Result<(String, String)> {
+        if last_uuid.is_none() {
+            return Ok(initial);
+        }
+        if Some(initial.0.as_str()) != last_uuid {
+            return Ok(initial);
+        }
+
+        let mut attempt = 0;
+        let max_attempts = 6;
+        let delay = Duration::from_millis(150);
+        loop {
+            if let Some(latest) = context::latest_assistant_text_uuid(&hook.transcript_path)? {
+                if Some(latest.0.as_str()) != last_uuid {
+                    return Ok(latest);
+                }
+            }
+            attempt += 1;
+            if attempt >= max_attempts {
+                return Ok(initial);
             }
             std::thread::sleep(delay);
         }

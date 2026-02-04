@@ -25,5 +25,6 @@ The user explicitly stated that reply loss is the main problem and that intermed
 - Remove the pending queue gate from reply delivery.
 - Deduplicate by the latest assistant message UUID to avoid sending the same `Stop` twice.
 - Retry briefly when a `Stop` hook arrives before assistant text is written.
+- Retry briefly when the UUID matches the last sent message to avoid races.
 - Log when a `Stop` hook still has no assistant text after retries or when UUID does not change.
 - Seeded context is replaced by optional thread context in `CLAUDE.md`.
