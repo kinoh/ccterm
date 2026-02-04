@@ -9,6 +9,10 @@ pub fn read_history(path: &Path, cutoff_ts: Option<&str>) -> Result<Vec<Transcri
     let file = File::open(path)
         .with_context(|| format!("failed to open transcript: {}", path.display()))?;
     let reader = BufReader::new(file);
+    let cutoff = cutoff_ts.and_then(parse_slack_ts_to_nanos);
+    if cutoff_ts.is_some() && cutoff.is_none() {
+        eprintln!("history cutoff ignored due to invalid Slack timestamp");
+    }
 
     let mut out = Vec::new();
     for line in reader.lines() {
@@ -18,7 +22,7 @@ pub fn read_history(path: &Path, cutoff_ts: Option<&str>) -> Result<Vec<Transcri
         }
         let value: Value =
             serde_json::from_str(&line).with_context(|| "failed to parse transcript JSON")?;
-        let msg = parse_transcript_line(&value, cutoff_ts)?;
+        let msg = parse_transcript_line(&value, cutoff)?;
         if let Some(msg) = msg {
             out.push(msg);
         }
@@ -101,7 +105,7 @@ pub fn format_history_context(history: &[TranscriptMessage]) -> Option<String> {
     Some(out)
 }
 
-fn parse_transcript_line(value: &Value, cutoff_ts: Option<&str>) -> Result<Option<TranscriptMessage>> {
+fn parse_transcript_line(value: &Value, cutoff_ts: Option<i128>) -> Result<Option<TranscriptMessage>> {
     let line_type = value
         .get("type")
         .and_then(Value::as_str)
@@ -113,8 +117,10 @@ fn parse_transcript_line(value: &Value, cutoff_ts: Option<&str>) -> Result<Optio
 
     let timestamp = value.get("timestamp").and_then(Value::as_str);
     if let (Some(cutoff), Some(ts)) = (cutoff_ts, timestamp) {
-        if ts > cutoff {
-            return Ok(None);
+        if let Some(ts_nanos) = parse_iso_ts_to_nanos(ts) {
+            if ts_nanos > cutoff {
+                return Ok(None);
+            }
         }
     }
 
@@ -142,6 +148,74 @@ fn parse_transcript_line(value: &Value, cutoff_ts: Option<&str>) -> Result<Optio
         role,
         text,
     }))
+}
+
+fn parse_slack_ts_to_nanos(ts: &str) -> Option<i128> {
+    let (secs, frac) = ts.split_once('.')?;
+    let secs: i128 = secs.parse().ok()?;
+    let nanos = parse_fractional_nanos(frac)?;
+    Some(secs * 1_000_000_000 + nanos)
+}
+
+fn parse_iso_ts_to_nanos(ts: &str) -> Option<i128> {
+    let ts = ts.strip_suffix('Z')?;
+    let (date, time) = ts.split_once('T')?;
+    let mut date_parts = date.splitn(3, '-');
+    let year: i32 = date_parts.next()?.parse().ok()?;
+    let month: i32 = date_parts.next()?.parse().ok()?;
+    let day: i32 = date_parts.next()?.parse().ok()?;
+
+    let (time_part, frac_part) = match time.split_once('.') {
+        Some(parts) => parts,
+        None => (time, ""),
+    };
+    let mut time_parts = time_part.splitn(3, ':');
+    let hour: i32 = time_parts.next()?.parse().ok()?;
+    let minute: i32 = time_parts.next()?.parse().ok()?;
+    let second: i32 = time_parts.next()?.parse().ok()?;
+    let nanos = if frac_part.is_empty() {
+        0
+    } else {
+        parse_fractional_nanos(frac_part)?
+    };
+
+    let days = days_from_civil(year, month, day);
+    let seconds = (days as i128) * 86_400
+        + (hour as i128) * 3_600
+        + (minute as i128) * 60
+        + (second as i128);
+    Some(seconds * 1_000_000_000 + nanos)
+}
+
+fn parse_fractional_nanos(frac: &str) -> Option<i128> {
+    if frac.is_empty() {
+        return Some(0);
+    }
+    let mut digits = frac.as_bytes();
+    if digits.len() > 9 {
+        digits = &digits[..9];
+    }
+    let mut value: i128 = 0;
+    for &b in digits {
+        if !(b'0'..=b'9').contains(&b) {
+            return None;
+        }
+        value = value * 10 + i128::from(b - b'0');
+    }
+    let scale = 10_i128.pow((9 - digits.len()) as u32);
+    Some(value * scale)
+}
+
+fn days_from_civil(year: i32, month: i32, day: i32) -> i64 {
+    let mut y = year;
+    let mut m = month;
+    y -= if m <= 2 { 1 } else { 0 };
+    m = if m > 2 { m - 3 } else { m + 9 };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let doy = (153 * m + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    (era * 146097 + doe - 719468) as i64
 }
 
 fn extract_user_text(content: &Value) -> Option<String> {

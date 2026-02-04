@@ -19,3 +19,4 @@ They also want the text to clearly indicate it is optional background.
 - The file explicitly states that the context is optional and may be ignored.
 - Context is derived from the main conversation transcript up to the incoming message timestamp.
 - Log why `CLAUDE.md` was not written when context cannot be built.
+- Compare Slack timestamps and transcript ISO timestamps by parsing both into epoch nanoseconds.
