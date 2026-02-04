@@ -180,6 +180,8 @@ impl Coordinator {
         let hook_path = self.hook_path_for_cwd(&cwd);
         self.register_hook_receiver(&cwd, &hook_path)?;
 
+        self.ensure_thread_context(&cwd, msg)?;
+
         let session_name = sessions::timestamp_session_name(&self.config.tmux.session_prefix)?;
         self.sessions
             .spawn_in(&session_name, &cwd)
@@ -191,8 +193,6 @@ impl Coordinator {
             prompt_timeout,
             Duration::from_millis(200),
         )?;
-
-        self.ensure_thread_context(&cwd, msg)?;
 
         let entry = SessionEntry {
             session_name: session_name.clone(),
