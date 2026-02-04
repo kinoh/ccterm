@@ -281,9 +281,22 @@ impl Coordinator {
 
         let latest = match context::latest_assistant_text_uuid(&hook.transcript_path)? {
             Some(latest) => latest,
-            None => return Ok(()),
+            None => {
+                eprintln!(
+                    "hook stop but no assistant text found: session_id={} transcript={}",
+                    hook.session_id,
+                    hook.transcript_path.display()
+                );
+                return Ok(());
+            }
         };
         if entry.last_sent_message_uuid.as_deref() == Some(latest.0.as_str()) {
+            eprintln!(
+                "hook stop but assistant uuid unchanged: session_id={} uuid={} transcript={}",
+                hook.session_id,
+                latest.0,
+                hook.transcript_path.display()
+            );
             return Ok(());
         }
 
